@@ -1,108 +1,126 @@
 <?php
-// admin.php
-require_once 'includes/functions.php';
+session_start();
+require_once 'includes/security.php';
+secureErrorHandling();
 
-// Information Disclosure: отключаем вывод ошибок
-ini_set('display_errors', 0);
-ini_set('log_errors', 1);
+try {
+    $db = new PDO("mysql:host=localhost;dbname=u82361;charset=utf8", 'u82361', '9967838');
+    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+} catch (PDOException $e) {
+    error_log($e->getMessage());
+    die('Ошибка БД');
+}
 
-// HTTP-авторизация
-if (!checkAdminAuth()) {
+// HTTP Basic Auth
+if (!isset($_SERVER['PHP_AUTH_USER']) || !isset($_SERVER['PHP_AUTH_PW'])) {
     header('HTTP/1.1 401 Unauthorized');
     header('WWW-Authenticate: Basic realm="Admin Panel"');
     echo '<h1>401 Требуется авторизация</h1>';
     exit();
 }
 
-// Обработка удаления (исправлено: SQL Injection)
+$stmt = $db->prepare("SELECT password_hash FROM admins WHERE login = ?");
+$stmt->execute([$_SERVER['PHP_AUTH_USER']]);
+$admin = $stmt->fetch();
+
+if (!$admin || md5($_SERVER['PHP_AUTH_PW']) != $admin['password_hash']) {
+    header('HTTP/1.1 401 Unauthorized');
+    header('WWW-Authenticate: Basic realm="Admin Panel"');
+    echo '<h1>401 Неверный логин или пароль</h1>';
+    exit();
+}
+
 if (isset($_POST['delete']) && isset($_POST['id'])) {
-    $stmt = $db->prepare("DELETE FROM application WHERE id = ?");
+    $stmt = $db->prepare("DELETE FROM rehearsal_booking WHERE id = ?");
     $stmt->execute([$_POST['id']]);
     $message = '<div class="success">✅ Запись удалена</div>';
 }
 
-// Получение данных (исправлено: SQL Injection)
-$stmt = $db->prepare("
-    SELECT a.*, GROUP_CONCAT(pl.name ORDER BY pl.name SEPARATOR ', ') as languages_list
-    FROM application a
-    LEFT JOIN application_language al ON a.id = al.application_id
-    LEFT JOIN programming_language pl ON al.language_id = pl.id
-    GROUP BY a.id ORDER BY a.id DESC
-");
-$stmt->execute();
-$users = $stmt->fetchAll();
+if (isset($_POST['update_status']) && isset($_POST['id']) && isset($_POST['status'])) {
+    $stmt = $db->prepare("UPDATE rehearsal_booking SET status = ? WHERE id = ?");
+    $stmt->execute([$_POST['status'], $_POST['id']]);
+    $message = '<div class="success">✅ Статус обновлён</div>';
+}
 
-$stmt = $db->prepare("SELECT COUNT(*) FROM application");
+$stmt = $db->prepare("SELECT * FROM rehearsal_booking ORDER BY booking_date DESC, booking_time DESC");
 $stmt->execute();
-$totalUsers = $stmt->fetchColumn();
+$bookings = $stmt->fetchAll();
 
-$languageStats = getLanguageStats();
+$stmt = $db->prepare("SELECT COUNT(*) FROM rehearsal_booking");
+$stmt->execute();
+$total = $stmt->fetchColumn();
+
+$stmt = $db->prepare("SELECT COUNT(*) FROM rehearsal_booking WHERE status = 'pending'");
+$stmt->execute();
+$pending = $stmt->fetchColumn();
 ?>
 
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Панель администратора</title>
+    <title>Админ-панель</title>
     <link rel="stylesheet" href="style.css">
     <style>
-        .stats-panel { background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
-        .stats-grid { display: flex; gap: 20px; flex-wrap: wrap; }
-        .stat-box { background: white; padding: 15px; border-radius: 8px; flex: 1; min-width: 200px; }
-        .lang-list { margin-top: 10px; }
-        .lang-item { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #ddd; }
-        table { width: 100%; border-collapse: collapse; background: white; }
-        th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
-        th { background: #4CAF50; color: white; }
-        tr:hover { background: #f5f5f5; }
-        .btn-edit { background: #ffc107; color: #333; padding: 5px 10px; text-decoration: none; border-radius: 4px; }
-        .btn-delete { background: #f44336; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer; }
+        .stats { background: #667eea; color: white; padding: 20px; border-radius: 16px; margin-bottom: 20px; display: flex; gap: 20px; flex-wrap: wrap; }
+        .stat-box { background: rgba(255,255,255,0.2); padding: 15px; border-radius: 12px; text-align: center; flex: 1; min-width: 150px; }
+        .stat-number { font-size: 32px; font-weight: bold; }
+        table { width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #4a5568; color: white; }
+        .status-pending { color: #e67e22; font-weight: bold; }
+        .status-confirmed { color: #27ae60; font-weight: bold; }
+        .status-cancelled { color: #e74c3c; font-weight: bold; }
+        .btn-delete { background: #e74c3c; color: white; border: none; padding: 5px 10px; border-radius: 6px; cursor: pointer; }
+        .status-select { padding: 5px; border-radius: 6px; }
     </style>
 </head>
 <body>
-<div class="container">
+<div class="container" style="max-width: 1200px;">
     <h1>👑 Панель администратора</h1>
     
     <?php if (isset($message)) echo $message; ?>
     
-    <div class="stats-panel">
-        <h2>📊 Статистика</h2>
-        <div class="stats-grid">
-            <div class="stat-box">
-                <strong>Всего пользователей:</strong> <?php echo h($totalUsers); ?>
-            </div>
-            <div class="stat-box">
-                <strong>Популярность языков:</strong>
-                <div class="lang-list">
-                    <?php foreach ($languageStats as $stat): ?>
-                        <div class="lang-item">
-                            <span><?php echo h($stat['name']); ?></span>
-                            <span><?php echo h($stat['count']); ?> чел.</span>
-                        </div>
-                    <?php endforeach; ?>
-                </div>
-            </div>
+    <div class="stats">
+        <div class="stat-box">
+            <div class="stat-number"><?= h($total) ?></div>
+            <div>Всего записей</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-number"><?= h($pending) ?></div>
+            <div>Ожидают подтверждения</div>
         </div>
     </div>
     
-    <h2>📋 Список пользователей</h2>
+    <h2>📋 Список записей на репетицию</h2>
     <table>
         <thead>
-            <tr><th>ID</th><th>ФИО</th><th>Email</th><th>Телефон</th><th>Языки</th><th>Действия</th></tr>
+            <tr><th>ID</th><th>ФИО</th><th>Телефон</th><th>Логин</th><th>Дата</th><th>Время</th><th>Студия</th><th>Статус</th><th>Действия</th></tr>
         </thead>
         <tbody>
-            <?php foreach ($users as $user): ?>
+            <?php foreach ($bookings as $b): ?>
             <tr>
-                <td><?php echo h($user['id']); ?></td>
-                <td><?php echo h($user['full_name']); ?></td>
-                <td><?php echo h($user['email']); ?></td>
-                <td><?php echo h($user['phone']); ?></td>
-                <td><?php echo h($user['languages_list'] ?: '-'); ?></td>
+                <td><?= h($b['id']) ?></td>
+                <td><?= h($b['full_name']) ?></td>
+                <td><?= h($b['phone']) ?></td>
+                <td><?= h($b['login']) ?></td>
+                <td><?= h($b['booking_date']) ?></td>
+                <td><?= h($b['booking_time']) ?></td>
+                <td><?= h($b['studio_name']) ?></td>
+                <td class="status-<?= $b['status'] ?>"><?= h($b['status']) ?></td>
                 <td>
-                    <a href="admin_edit.php?id=<?php echo h($user['id']); ?>" class="btn-edit">✏️ Редактировать</a>
-                    <form method="POST" style="display: inline;" onsubmit="return confirm('Удалить?')">
-                        <input type="hidden" name="id" value="<?php echo h($user['id']); ?>">
-                        <button type="submit" name="delete" class="btn-delete">🗑️ Удалить</button>
+                    <form method="POST" style="display: inline-block; margin-right: 5px;">
+                        <input type="hidden" name="id" value="<?= h($b['id']) ?>">
+                        <select name="status" class="status-select">
+                            <option value="pending" <?= $b['status'] == 'pending' ? 'selected' : '' ?>>В ожидании</option>
+                            <option value="confirmed" <?= $b['status'] == 'confirmed' ? 'selected' : '' ?>>Подтверждено</option>
+                            <option value="cancelled" <?= $b['status'] == 'cancelled' ? 'selected' : '' ?>>Отменено</option>
+                        </select>
+                        <button type="submit" name="update_status">✅</button>
+                    </form>
+                    <form method="POST" style="display: inline-block;" onsubmit="return confirm('Удалить запись?')">
+                        <input type="hidden" name="id" value="<?= h($b['id']) ?>">
+                        <button type="submit" name="delete" class="btn-delete">🗑️</button>
                     </form>
                 </td>
             </tr>
